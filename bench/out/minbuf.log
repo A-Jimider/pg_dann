@@ -1,0 +1,20 @@
+== 最小 shared_buffers(第二遍 avg ≤ 1.5×基线;100 查询/遍,两遍) ==
+   engine baseline_ms  min_MB  at_min_ms
+    dann_rq    32MB -> avg    11.38ms (base 8.55) ok
+  dann_rq       8.55ms     32MB     11.38ms
+   dann_sq8    32MB -> avg    10.41ms (base 9.33) ok
+ dann_sq8       9.33ms     32MB     10.41ms
+    ivfflat    32MB -> avg    23.23ms (base 23.58) ok
+  ivfflat      23.58ms     32MB     23.23ms
+       hnsw    32MB -> avg     8.43ms (base 3.35) SLOW
+       hnsw    48MB -> avg     8.34ms (base 3.35) SLOW
+       hnsw    64MB -> avg     7.28ms (base 3.35) SLOW
+       hnsw    96MB -> avg     6.32ms (base 3.35) SLOW
+       hnsw   128MB -> avg     7.21ms (base 3.35) SLOW
+       hnsw   192MB -> avg     6.17ms (base 3.35) SLOW
+       hnsw   256MB -> avg     6.29ms (base 3.35) SLOW
+       hnsw   384MB -> avg     6.06ms (base 3.35) SLOW
+       hnsw   512MB -> avg     5.28ms (base 3.35) SLOW
+       hnsw   768MB -> avg     3.21ms (base 3.35) ok
+     hnsw       3.35ms    768MB      3.21ms
+done (instance left at shared_buffers=2048MB)

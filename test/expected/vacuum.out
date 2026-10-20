@@ -1,0 +1,68 @@
+-- W10 测试:ambulkdelete 页内紧凑删除 + dann_list_stats + VACUUM 后一致性
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION pg_dann;
+CREATE TABLE vac (id int, embedding vector(32));
+INSERT INTO vac
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,32) j))::vector
+FROM generate_series(1, 5000) i;
+CREATE INDEX vac_idx ON vac USING dann (embedding dann_l2_ops) WITH (nlist = 25);
+-- 初始条目数
+SELECT sum(entries) AS total_entries, sum(pages) AS total_pages
+FROM dann_list_stats('vac_idx');
+ total_entries | total_pages 
+---------------+-------------
+          5000 |          41
+(1 row)
+
+-- 删 30% 并 vacuum:条目数应精确降到 3500
+DELETE FROM vac WHERE id % 10 < 3;
+VACUUM vac;
+SELECT sum(entries) AS after_vacuum FROM dann_list_stats('vac_idx');
+ after_vacuum 
+--------------
+         3500
+(1 row)
+
+-- VACUUM 后查询与精确序一致(recall 不掉);查询行 id=105 不被删除
+SET enable_seqscan = off;
+SET dann.probes = 25;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM vac ORDER BY embedding <-> (SELECT embedding FROM vac WHERE id = 105) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 25590 | 105 | 4847
+(1 row)
+
+SET enable_seqscan = on;
+SET enable_indexscan = off;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM vac ORDER BY embedding <-> (SELECT embedding FROM vac WHERE id = 105) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 25590 | 105 | 4847
+(1 row)
+
+-- 查询向量为 NULL:退化为全索引扫描,返回行集合(序无定义,不报错不崩)
+SET enable_seqscan = off; SET enable_indexscan = on;
+SELECT count(*) FROM (
+  SELECT id FROM vac ORDER BY embedding <-> NULL::vector LIMIT 10) s;
+ count 
+-------
+    10
+(1 row)
+
+-- 空 list 边界:删除某 list 全部条目后 vacuum 不炸(链保留,条目为 0)
+DELETE FROM vac WHERE id BETWEEN 1 AND 4000;  -- 留下稀疏分布
+VACUUM vac;
+SELECT count(*) AS nonempty_lists, sum(entries) FROM dann_list_stats('vac_idx') WHERE entries > 0;
+ nonempty_lists | sum 
+----------------+-----
+             25 | 700
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+DROP TABLE vac;
+DROP EXTENSION pg_dann;
+DROP EXTENSION vector;

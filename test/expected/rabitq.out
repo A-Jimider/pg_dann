@@ -1,0 +1,158 @@
+-- W7 RaBitQ 功能测试:编码/查询/插入链路 + auto 维度自适应 + 非 2 幂维补零
+-- 判定方式同 rerank.sql:probes=nlist 时候选=全集,rerank 后须等于精确序
+-- (聚合指纹比较,与旋转种子/浮点结合序无关)。
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION pg_dann;
+-- ===== 1. L2 + 显式 rabitq(dim 256,2 幂) =====
+CREATE TABLE rq_l2 (id int, embedding vector(256));
+INSERT INTO rq_l2
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,256) j))::vector
+FROM generate_series(1, 3000) i;
+CREATE INDEX rq_l2_idx ON rq_l2 USING dann (embedding dann_l2_ops)
+  WITH (nlist = 30, quantizer = 'rabitq');
+SET enable_seqscan = off;
+SET dann.probes = 30;
+-- 精确基线
+SET enable_seqscan = on; SET enable_indexscan = off;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_l2 ORDER BY embedding <-> (SELECT embedding FROM rq_l2 WHERE id = 123) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 14169 | 123 | 2765
+(1 row)
+
+-- dann rabitq + rerank
+SET enable_seqscan = off; SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_l2 ORDER BY embedding <-> (SELECT embedding FROM rq_l2 WHERE id = 123) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 14169 | 123 | 2765
+(1 row)
+
+-- 建后插入(rabitq 编码路径):新行紧挨查询点,应进 top-3
+INSERT INTO rq_l2
+SELECT 9999, (ARRAY(SELECT (sin(123*0.371 + j*0.917)*100 + 0.001)::float8
+                    FROM generate_series(1,256) j))::vector;
+SELECT count(*), sum(id), min(id) FROM (
+  SELECT id FROM rq_l2 ORDER BY embedding <-> (SELECT embedding FROM rq_l2 WHERE id = 123) LIMIT 3) s;
+ count |  sum  | min 
+-------+-------+-----
+     3 | 12091 | 123
+(1 row)
+
+-- 估计序路径(rerank off)可用
+SET dann.enable_rerank = off;
+SELECT count(*) FROM (
+  SELECT id FROM rq_l2 ORDER BY embedding <-> (SELECT embedding FROM rq_l2 WHERE id = 123) LIMIT 10) s;
+ count 
+-------
+    10
+(1 row)
+
+RESET dann.enable_rerank;
+-- ===== 2. 非 2 幂维(dim=100 → 补零到 128) =====
+CREATE TABLE rq_pad (id int, embedding vector(100));
+INSERT INTO rq_pad
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,100) j))::vector
+FROM generate_series(1, 2000) i;
+CREATE INDEX rq_pad_idx ON rq_pad USING dann (embedding dann_l2_ops)
+  WITH (nlist = 20, quantizer = 'rabitq');
+SET enable_seqscan = on; SET enable_indexscan = off;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_pad ORDER BY embedding <-> (SELECT embedding FROM rq_pad WHERE id = 42) LIMIT 10) s;
+ count | sum  | min | max  
+-------+------+-----+------
+    10 | 9650 |  42 | 1888
+(1 row)
+
+SET enable_seqscan = off; SET enable_indexscan = on;
+SET dann.probes = 20;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_pad ORDER BY embedding <-> (SELECT embedding FROM rq_pad WHERE id = 42) LIMIT 10) s;
+ count | sum  | min | max  
+-------+------+-----+------
+    10 | 9650 |  42 | 1888
+(1 row)
+
+-- ===== 3. cosine / IP(rabitq) =====
+CREATE TABLE rq_cos (id int, embedding vector(256));
+INSERT INTO rq_cos SELECT id, embedding FROM rq_l2 WHERE id <> 9999;
+CREATE INDEX rq_cos_idx ON rq_cos USING dann (embedding dann_cosine_ops)
+  WITH (nlist = 30, quantizer = 'rabitq');
+SET dann.probes = 30;
+SET enable_indexscan = off; SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_cos ORDER BY embedding <=> (SELECT embedding FROM rq_cos WHERE id = 42) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 15984 |  42 | 2938
+(1 row)
+
+SET enable_seqscan = off; SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_cos ORDER BY embedding <=> (SELECT embedding FROM rq_cos WHERE id = 42) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 15984 |  42 | 2938
+(1 row)
+
+CREATE TABLE rq_ip (id int, embedding vector(256));
+INSERT INTO rq_ip SELECT id, embedding FROM rq_l2 WHERE id <> 9999;
+CREATE INDEX rq_ip_idx ON rq_ip USING dann (embedding dann_ip_ops)
+  WITH (nlist = 30, quantizer = 'rabitq');
+SET enable_indexscan = off; SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_ip ORDER BY embedding <#> (SELECT embedding FROM rq_ip WHERE id = 42) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 13359 |  42 | 2684
+(1 row)
+
+SET enable_seqscan = off; SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rq_ip ORDER BY embedding <#> (SELECT embedding FROM rq_ip WHERE id = 42) LIMIT 10) s;
+ count |  sum  | min | max  
+-------+-------+-----+------
+    10 | 13359 |  42 | 2684
+(1 row)
+
+-- ===== 4. auto 维度自适应:dim≥128 → RaBitQ,dim<128 → SQ8 =====
+-- 判定:同数据同参数下,auto 与显式量化器的索引体积逐字节一致
+CREATE TABLE rq_auto (id int, embedding vector(256));
+INSERT INTO rq_auto SELECT id, embedding FROM rq_l2 WHERE id <> 9999;
+CREATE INDEX rq_auto_a ON rq_auto USING dann (embedding) WITH (nlist = 30);  -- 缺省 auto
+CREATE INDEX rq_auto_r ON rq_auto USING dann (embedding dann_l2_ops)
+  WITH (nlist = 30, quantizer = 'rabitq');
+SELECT pg_relation_size('rq_auto_a') = pg_relation_size('rq_auto_r') AS auto_is_rabitq;
+ auto_is_rabitq 
+----------------
+ t
+(1 row)
+
+CREATE TABLE rq_auto_lo (id int, embedding vector(16));
+INSERT INTO rq_auto_lo
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,16) j))::vector
+FROM generate_series(1, 2000) i;
+CREATE INDEX rq_auto_lo_a ON rq_auto_lo USING dann (embedding) WITH (nlist = 20);
+CREATE INDEX rq_auto_lo_s ON rq_auto_lo USING dann (embedding dann_l2_ops)
+  WITH (nlist = 20, quantizer = 'sq8');
+SELECT pg_relation_size('rq_auto_lo_a') = pg_relation_size('rq_auto_lo_s') AS auto_is_sq8;
+ auto_is_sq8 
+-------------
+ t
+(1 row)
+
+RESET dann.probes;
+RESET enable_seqscan;
+DROP TABLE rq_l2;
+DROP TABLE rq_pad;
+DROP TABLE rq_cos;
+DROP TABLE rq_ip;
+DROP TABLE rq_auto;
+DROP TABLE rq_auto_lo;
+DROP EXTENSION pg_dann;
+DROP EXTENSION vector;

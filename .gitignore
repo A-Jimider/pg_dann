@@ -1,0 +1,21 @@
+# 构建产物
+*.o
+*.so
+bench/quant_harness
+
+# Python 环境
+.venv/
+__pycache__/
+*.pyc
+
+# benchmark 数据集(约 3.8GB,按 DEVLOG §4 从 hf-mirror 重新下载)
+bench/data/
+
+# 本地实例连接参数(含真实路径/端口,勿提交)
+bench/env.local.sh
+
+# pg_regress 运行输出(make installcheck 可再生)
+/results/
+
+# 编辑器配置
+.vscode/

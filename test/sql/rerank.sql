@@ -1,0 +1,117 @@
+-- W6 功能测试:heap rerank 精确性 + 延迟预算截断
+-- 数据为确定性构造(sin 生成,无随机种子依赖),聚合指纹与行序无关,
+-- 跨平台浮点差异不影响判定;有序输出仅用于间距 >> 量化误差的场合。
+
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION pg_dann;
+
+-- ===== 1. rerank 精确性(L2):probes=nlist 时候选=全集,rerank 后须等于精确序 =====
+CREATE TABLE rr_l2 (id int, embedding vector(16));
+INSERT INTO rr_l2
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,16) j))::vector
+FROM generate_series(1, 2000) i;
+CREATE INDEX rr_l2_idx ON rr_l2 USING dann (embedding dann_l2_ops)
+  WITH (nlist = 20, quantizer = 'sq8');
+
+SET enable_seqscan = off;
+SET dann.probes = 20;            -- 全 list:候选 = 全部 2000 行
+
+-- 精确基线(强制顺序扫描)
+SET enable_seqscan = on;
+SET enable_indexscan = off;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 777) LIMIT 10) s;
+
+-- dann + rerank(默认 on):聚合指纹必须与精确基线逐字节一致
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 777) LIMIT 10) s;
+
+-- LIMIT 250 > 首块 γ×10=200:跨补货块发射仍须与精确序一致
+SET enable_indexscan = off;
+SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 777) LIMIT 250) s;
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 777) LIMIT 250) s;
+
+-- 删除 top-1(id=777):rerank 回表按快照跳过死元组,结果须与新精确序一致
+DELETE FROM rr_l2 WHERE id = 777;
+SET enable_indexscan = off;
+SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 42) LIMIT 10) s;
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 42) LIMIT 10) s;
+
+-- ===== 2. cosine / IP 度量同样成立 =====
+CREATE TABLE rr_cos (id int, embedding vector(16));
+INSERT INTO rr_cos SELECT id, embedding FROM rr_l2;  -- 已删 777,余下 1999 行
+CREATE INDEX rr_cos_idx ON rr_cos USING dann (embedding dann_cosine_ops)
+  WITH (nlist = 20, quantizer = 'sq8');
+SET dann.probes = 20;
+SET enable_indexscan = off;
+SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_cos ORDER BY embedding <=> (SELECT embedding FROM rr_cos WHERE id = 42) LIMIT 10) s;
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_cos ORDER BY embedding <=> (SELECT embedding FROM rr_cos WHERE id = 42) LIMIT 10) s;
+
+CREATE TABLE rr_ip (id int, embedding vector(16));
+INSERT INTO rr_ip SELECT id, embedding FROM rr_l2;
+CREATE INDEX rr_ip_idx ON rr_ip USING dann (embedding dann_ip_ops)
+  WITH (nlist = 20, quantizer = 'sq8');
+SET enable_indexscan = off;
+SET enable_seqscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_ip ORDER BY embedding <#> (SELECT embedding FROM rr_ip WHERE id = 42) LIMIT 10) s;
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SELECT count(*), sum(id), min(id), max(id) FROM (
+  SELECT id FROM rr_ip ORDER BY embedding <#> (SELECT embedding FROM rr_ip WHERE id = 42) LIMIT 10) s;
+
+-- ===== 3. enable_rerank=off:估计序路径可用,行数不变 =====
+SET dann.enable_rerank = off;
+SELECT count(*) FROM (
+  SELECT id FROM rr_l2 ORDER BY embedding <-> (SELECT embedding FROM rr_l2 WHERE id = 42) LIMIT 10) s;
+RESET dann.enable_rerank;
+
+-- ===== 4. 延迟预算截断:扫描规模 >> 1ms,预算必然触发 =====
+CREATE TABLE rr_big (id int, embedding vector(64));
+INSERT INTO rr_big
+SELECT i, (ARRAY(SELECT (sin(i*0.371 + j*0.917)*100)::float8
+                 FROM generate_series(1,64) j))::vector
+FROM generate_series(1, 100000) i;
+CREATE INDEX rr_big_idx ON rr_big USING dann (embedding dann_l2_ops)
+  WITH (nlist = 60, quantizer = 'sq8');
+SET dann.probes = 60;
+
+SELECT dann_scan_stats_reset();
+SET dann.max_latency_ms = 0;     -- 不限:无截断
+SELECT count(*) FROM (
+  SELECT id FROM rr_big ORDER BY embedding <-> (SELECT embedding FROM rr_big WHERE id = 42) LIMIT 10) s;
+SELECT scans, truncated, lists_skipped FROM dann_scan_stats();
+
+SET dann.max_latency_ms = 1;     -- 1ms 预算:posting 扫描必然超时截断
+SELECT count(*) FROM (           -- 平滑降级:仍返回最近邻,行数不变
+  SELECT id FROM rr_big ORDER BY embedding <-> (SELECT embedding FROM rr_big WHERE id = 42) LIMIT 10) s;
+SELECT scans, truncated, lists_skipped > 0 AS skipped_any FROM dann_scan_stats();
+RESET dann.max_latency_ms;
+
+RESET dann.probes;
+RESET enable_seqscan;
+
+DROP TABLE rr_l2;
+DROP TABLE rr_cos;
+DROP TABLE rr_ip;
+DROP TABLE rr_big;
+DROP EXTENSION pg_dann;
+DROP EXTENSION vector;
