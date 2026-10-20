@@ -1,5 +1,7 @@
 # pg_dann — 磁盘优先的向量索引 PostgreSQL 扩展
 
+**中文** | [English](README.en.md)
+
 IVF(倒排聚类)+ 量化(SQ8 / RaBitQ)的 ANN 索引访问方法,全磁盘驻留、
 全 WAL 化、崩溃可恢复。文档:[DESIGN.md](DESIGN.md)(计划稿)|
 [ARCHITECTURE.md](ARCHITECTURE.md)(竣工架构,以代码为准)|
