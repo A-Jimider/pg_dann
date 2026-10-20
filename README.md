@@ -98,3 +98,8 @@ bench/crash_test.sh                     # 崩溃恢复矩阵(kill -9;会重启�
 目录:`src/`(AM 回调)、`quant/`(量化器,纯 C)、`simd/`(AVX2/AVX-512
 分派)、`golden/`(numpy golden model + 对拍夹具 + 误差曲线)、
 `test/`(pg_regress)、`bench/`(SIFT1M 基准与验收脚本)。
+
+## 许可证
+
+[AGPL-3.0](LICENSE)。允许商业使用;但修改后再分发、或作为网络服务
+对外提供(含云托管/SaaS),均须以同一许可证公开源码。
